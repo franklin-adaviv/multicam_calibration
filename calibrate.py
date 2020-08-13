@@ -39,90 +39,118 @@ def execute_local_registration(source_pcd,target_pcd,trans_init,threshold):
     return reg_p2p
 
 def get_point_cloud(file):
-	return o3d.io.read_point_cloud(file)
+    return o3d.io.read_point_cloud(file)
 
 def compute_transformation_matrix(source_cloud,target_cloud):
-	# computes the transformatio matrix that transforms the source cloud to match the target cloud
-	# it will choose the matrix that minimizes the distance beween the two point clouds. 
-	# See ICP algorithm.
+    # computes the transformatio matrix that transforms the source cloud to match the target cloud
+    # it will choose the matrix that minimizes the distance beween the two point clouds. 
+    # See ICP algorithm.
 
-	# create axes
-	axes = o3d.geometry.TriangleMesh.create_coordinate_frame(size = 1, origin = np.array([0,0,0]))
+    # create axes
+    axes = o3d.geometry.TriangleMesh.create_coordinate_frame(size = 1, origin = np.array([0,0,0]))
 
-	# # initail vizualization
-	# o3d.visualization.draw_geometries([source_cloud,target_cloud,axes])
+    ### compute global registration ##
+    voxel_size = 0.01
+    distance_threshold = voxel_size*10.0
+    global_result = execute_global_registration(source_cloud,target_cloud,voxel_size,distance_threshold)
 
-	#### visuzalize manual rotation ###
-	# initial_displacement = -np.array([-0.1325,-0.1975,0.0])
-	# initial_rotation = np.array([-1.570796327,0.0,0])
-	# R = target_cloud.get_rotation_matrix_from_zyx(initial_rotation)
-	# target_cloud_a = copy.deepcopy(target_cloud)
-	# target_cloud_a.paint_uniform_color([0,0,1])66666
-	# target_cloud.translate(initial_displacement)
-	# target_cloud.rotate(R, center=(0, 0, 0))
-	# o3d.visualization.draw_geometries([target_cloud_a,source_cloud,target_cloud,axes])
+    ### compute local registration ###
+    distance_threshold = voxel_size*9.0
+    local_result = execute_local_registration(source_cloud,target_cloud,global_result.transformation, distance_threshold)
 
-	### compute global registration ##
-	voxel_size = 0.01
-	distance_threshold = voxel_size*10.0
-	global_result = execute_global_registration(source_cloud,target_cloud,voxel_size,distance_threshold)
-	print("global: ")
-	print(global_result.transformation)
-
-	### compute local registration ###
-	distance_threshold = voxel_size*9.0
-	local_result = execute_local_registration(source_cloud,target_cloud,global_result.transformation, distance_threshold)
-	print("local: ")
-	print(local_result.transformation)
-
-	# change colors of point clouds
-	# source_cloud.paint_uniform_color([0,1,1]) # teal
-	# target_cloud.paint_uniform_color([1,0,0]) # red
-
-	# transform 
-	transformed_source_cloud = copy.deepcopy(source_cloud)
-	transformed_source_cloud.transform(local_result.transformation)
-
-	# plot
-	# axes = o3d.geometry.TriangleMesh.create_coordinate_frame(size = 1, origin = np.array([0,0,0]))
-	# o3d.visualization.draw_geometries([transformed_source_cloud,target_cloud,axes])
-
-	return local_result.transformation
+    return local_result.transformation
 
 def extract_transform(matrix):
 
-	for name, val in zip(trimesh.transformations.decompose_matrix(matrix) ,["scale","shear","angles","translation","perspective"]):
-		print("_______")
-		print(name)
-		print(val)
+    decomposed = trimesh.transformations.decompose_matrix(matrix)
+
+    for name, val in zip(decomposed ,["scale","shear","angles","translation","perspective"]):
+        print("_______")
+        print(name)
+        print(val)
+
+    return decomposed
+
+
+def compute_best_transformation_matrix(pc_1_raw, pc_2_raw, N = 5, show_viz = True):
+    # leverages the compute transformation matrix function above. But runs that function multiple times and extracts the best tranformation matrix
+    
+    # stores the scores for each iteration
+    scores_dict = dict()
+
+    # voxel_size down sampling
+    voxel_size = 0.01
+    pc_1_raw = pc_1_raw.voxel_down_sample(voxel_size)
+    pc_2_raw = pc_2_raw.voxel_down_sample(voxel_size)
+    
+    # intial evaluation
+    threshold = 0.05
+    intial_evaluation = o3d.registration.evaluate_registration(pc_1_raw, pc_2_raw, threshold, np.eye(4))
+
+    for i in range(N):
+
+        print("reading point clouds. Iter #%s of %s ......" % (i+1, N))
+
+        # copy point clouds
+        pc_1 = copy.deepcopy(pc_1_raw)
+        pc_2 = copy.deepcopy(pc_2_raw)
+
+        # paint uniform color
+        pc_1.paint_uniform_color([1,0,0]) # red
+        pc_2.paint_uniform_color([0,0,1]) # blue
+
+        # compute transform matrix and evaluate
+        matrix = compute_transformation_matrix(pc_1,pc_2)
+        evaluation = o3d.registration.evaluate_registration(pc_1, pc_2, threshold, matrix)
+        
+        # add to scores dict
+        scores_dict[evaluation.fitness] = (matrix,evaluation)
+
+    print("__________________________________________________________________________")
+    print("###### Finished iterations ######")
+    
+    # read point clouds
+    pc_1 = pc_1_raw
+    pc_2 = pc_2_raw
+    axes = o3d.geometry.TriangleMesh.create_coordinate_frame(size = 1, origin = np.array([0,0,0]))
+
+    # show scores
+    print("scores: ",sorted(list(scores_dict.keys())))
+
+    # extract best transform 
+    best_score = max(scores_dict.keys())
+    if best_score < 0.5: 
+        print(" *** scores less than 0.5 are not very good. You may want to increase the interation number to get a better score. ***")
+    best_transform, best_evaluation = scores_dict[best_score]
+    print("best evaluation: \n", best_evaluation)
+    print("best transform: \n", best_transform)
+
+    # apply transform 
+    pc_1.transform(best_transform)
+    scale,shear,angles,translation,perspective = extract_transform(best_transform)
+    Tx, Ty, Tz = translation
+    Rx, Ry, Rz = angles
+    ROS_input = [-Tx, -Ty, -Tz, Ry, Rx, Rz]
+    print("\n____________________ \n copy this into ROS:")
+    print(ROS_input)
+
+    # plot final results
+    if show_viz:
+        o3d.visualization.draw_geometries([pc_2,pc_1,axes])
+
+        pc_1.paint_uniform_color([1,0,0])
+        pc_2.paint_uniform_color([0,0,1])
+
+        o3d.visualization.draw_geometries([pc_2,pc_1,axes])
+
+    return ROS_input, best_score
 
 if __name__ == "__main__":
-	# read data 
-	target = get_point_cloud("Testing_multicam_fixed.pcd")#("Testing_multicam_1597076460155095.pcd")#("f1.pcd") # top camera
-	source = get_point_cloud("Testing_multicam_rot_5.pcd")#("Testing_multicam_1597076391518815.pcd")#"f2.pcd") # bottom Camera
-	
-	axes = o3d.geometry.TriangleMesh.create_coordinate_frame(size = 1, origin = np.array([0,0,0]))
-	o3d.visualization.draw_geometries([source,axes])
-	# target.paint_uniform_color([1,0,0])
-	# source.paint_uniform_color([0,1,0])
-	### flip z ##
-	# source_pts = np.asarray(source.points)[:,2]
+    cam_1_fn = "data/camera_1_c.ply"
+    cam_2_fn = "data/camera_2_c.ply"
 
-	### preprocessing positions ###
-	# initial_rotation = np.array([0.0,0.0,np.pi])
-	# R = source.get_rotation_matrix_from_xyz(initial_rotation)	
-	# source.rotate(R,center = (0,0,0))
-	
-	# get transformation matrix
-	matrix = compute_transformation_matrix(source,target)
-	extract_transform(matrix)
+    pc_1_raw = o3d.io.read_point_cloud(cam_1_fn)
+    pc_2_raw = o3d.io.read_point_cloud(cam_2_fn)
 
+    compute_best_transformation_matrix(pc_1_raw,pc_2_raw, N = 1, show_viz = True)
 
-	A = np.array([[-0.99341053, -0.06755151,  0.09258674, -0.02571362],
-				  [ 0.07032668, -0.99715739,  0.02704247, -0.19548259],
-				  [	0.09049679  ,0.03337559 , 0.99533733, -0.60420346],
-				  [ 0.  ,        0. ,         0.,          1.    ]])
-	A = np.array([[ 2.66904865e-01,  9.62905162e-01,  3.96918440e-02,  2.02237555e-01],
-	 			  [-9.63722849e-01,  2.66689146e-01,  1.07316972e-02,  5.50751884e-01],
-	              [-2.51777394e-04, -4.11162791e-02,  9.99154337e-01, -5.34076005e-01],
-	              [ 0.00000000e+00,  0.00000000e+00,  0.00000000e+00,  1.00000000e+00]])

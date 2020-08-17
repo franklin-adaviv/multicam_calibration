@@ -60,19 +60,20 @@ def compute_transformation_matrix(source_cloud,target_cloud):
 
     return local_result.transformation
 
-def extract_transform(matrix):
+def extract_transform(matrix, show_prints = True):
 
     decomposed = trimesh.transformations.decompose_matrix(matrix)
 
-    for name, val in zip(decomposed ,["scale","shear","angles","translation","perspective"]):
-        print("_______")
-        print(name)
-        print(val)
+    if show_prints:
+        for name, val in zip(decomposed ,["scale","shear","angles","translation","perspective"]):
+            print("_______")
+            print(name)
+            print(val)
 
     return decomposed
 
 
-def compute_best_transformation_matrix(pc_1_raw, pc_2_raw, N = 5, show_viz = True):
+def compute_best_transformation_matrix(pc_1_raw, pc_2_raw, N = 5, show_viz = True, show_prints = True):
     # leverages the compute transformation matrix function above. But runs that function multiple times and extracts the best tranformation matrix
     
     # stores the scores for each iteration
@@ -82,14 +83,31 @@ def compute_best_transformation_matrix(pc_1_raw, pc_2_raw, N = 5, show_viz = Tru
     voxel_size = 0.01
     pc_1_raw = pc_1_raw.voxel_down_sample(voxel_size)
     pc_2_raw = pc_2_raw.voxel_down_sample(voxel_size)
-    
+
+    axes = o3d.geometry.TriangleMesh.create_coordinate_frame(size = 1, origin = np.array([0,0,0]))
+    if show_viz:
+        o3d.visualization.draw_geometries([pc_1_raw, axes])
+
+
+    R1 = o3d.geometry.get_rotation_matrix_from_xyz((np.pi/2,0,0))
+    R2 = o3d.geometry.get_rotation_matrix_from_xyz((0,0,-np.pi/2))
+    T1 = np.eye(4)
+    T1[:3,:3] = R1
+    T2 = np.eye(4)
+    T2[:3,:3] = R2
+    pc_1_raw.transform(T1)
+    pc_1_raw.transform(T2)
+    pc_2_raw.transform(T1)
+    pc_2_raw.transform(T2)
+
     # intial evaluation
     threshold = 0.05
     intial_evaluation = o3d.registration.evaluate_registration(pc_1_raw, pc_2_raw, threshold, np.eye(4))
-
+    if show_viz:
+        o3d.visualization.draw_geometries([pc_1_raw,axes])
     for i in range(N):
 
-        print("reading point clouds. Iter #%s of %s ......" % (i+1, N))
+        print("computing transformation. Iter #%s of %s ......" % (i+1, N))
 
         # copy point clouds
         pc_1 = copy.deepcopy(pc_1_raw)
@@ -106,33 +124,36 @@ def compute_best_transformation_matrix(pc_1_raw, pc_2_raw, N = 5, show_viz = Tru
         # add to scores dict
         scores_dict[evaluation.fitness] = (matrix,evaluation)
 
-    print("__________________________________________________________________________")
-    print("###### Finished iterations ######")
+    if show_prints:
+        print("__________________________________________________________________________")
+        print("###### Finished iterations ######")
     
     # read point clouds
     pc_1 = pc_1_raw
     pc_2 = pc_2_raw
-    axes = o3d.geometry.TriangleMesh.create_coordinate_frame(size = 1, origin = np.array([0,0,0]))
 
     # show scores
-    print("scores: ",sorted(list(scores_dict.keys())))
+    if show_prints:
+        print("scores: ",sorted(list(scores_dict.keys())))
 
     # extract best transform 
     best_score = max(scores_dict.keys())
-    if best_score < 0.5: 
-        print(" *** scores less than 0.5 are not very good. You may want to increase the interation number to get a better score. ***")
+    if show_prints:
+        if best_score < 0.5: 
+            print(" *** scores less than 0.5 are not very good. You may want to increase the interation number to get a better score. ***")
+        print("best evaluation: \n", best_evaluation)
+        print("best transform: \n", best_transform)
     best_transform, best_evaluation = scores_dict[best_score]
-    print("best evaluation: \n", best_evaluation)
-    print("best transform: \n", best_transform)
 
     # apply transform 
     pc_1.transform(best_transform)
-    scale,shear,angles,translation,perspective = extract_transform(best_transform)
+    scale,shear,angles,translation,perspective = extract_transform(best_transform,show_prints = show_prints)
     Tx, Ty, Tz = translation
     Rx, Ry, Rz = angles
-    ROS_input = [-Tx, -Ty, -Tz, Ry, Rx, Rz]
-    print("\n____________________ \n copy this into ROS:")
-    print(ROS_input)
+    ROS_input = [Tx, Ty, Tz, Rz, Ry, Rx]
+    if show_prints:
+        print("\n____________________ \n copy this into ROS:")
+        print(ROS_input)
 
     # plot final results
     if show_viz:
